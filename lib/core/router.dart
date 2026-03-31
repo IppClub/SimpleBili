@@ -6,25 +6,17 @@ import '../features/feed/feed_page.dart';
 import '../features/search/search_page.dart';
 import '../features/player/player_page.dart';
 import '../features/up/up_space_page.dart';
+import '../features/favorite/favorite_page.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
   final authState = ref.watch(authProvider);
-  
+
   return GoRouter(
     initialLocation: '/',
     routes: [
-      GoRoute(
-        path: '/login',
-        builder: (context, state) => const LoginPage(),
-      ),
-      GoRoute(
-        path: '/',
-        builder: (context, state) => const FeedPage(),
-      ),
-      GoRoute(
-        path: '/search',
-        builder: (context, state) => const SearchPage(),
-      ),
+      GoRoute(path: '/login', builder: (context, state) => const LoginPage()),
+      GoRoute(path: '/', builder: (context, state) => const FeedPage()),
+      GoRoute(path: '/search', builder: (context, state) => const SearchPage()),
       GoRoute(
         path: '/up/:mid',
         builder: (context, state) {
@@ -37,6 +29,17 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) {
           final bvid = state.pathParameters['bvid']!;
           return PlayerPage(bvid: bvid);
+        },
+      ),
+      GoRoute(
+        path: '/favorite',
+        builder: (context, state) => const FavoritePage(),
+      ),
+      GoRoute(
+        path: '/favorite/:mediaId',
+        builder: (context, state) {
+          final mediaId = int.parse(state.pathParameters['mediaId']!);
+          return FavoriteDetailPage(mediaId: mediaId);
         },
       ),
     ],

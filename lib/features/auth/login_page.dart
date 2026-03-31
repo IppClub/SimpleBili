@@ -71,7 +71,7 @@ class _LoginPageState extends ConsumerState<LoginPage>
             mainAxisSize: MainAxisSize.min,
             children: [
               const Text(
-                'SimpleBi',
+                'SimpleBili',
                 style: TextStyle(
                   fontSize: 32,
                   fontWeight: FontWeight.bold,

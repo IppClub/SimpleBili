@@ -40,13 +40,13 @@ class VideoService {
       throw Exception('WBI keys not available');
     }
 
-    // Use fnval: 1 to get combined stream (FLV/MP4) which includes audio.
-    // DASH (fnval: 16) separates audio and video into different URLs.
+    // Use DASH (fnval: 16) for higher quality video with separate audio/video streams.
+    // Bit flags: 16=DASH, 64=HDR, 128=4K, 256=Dolby Audio, 512=Dolby Vision, 1024=8K, 2048=AV1
     final Map<String, dynamic> params = {
       'bvid': bvid,
       'cid': cid.toString(),
       'qn': qn.toString(),
-      'fnval': '1',
+      'fnval': '4048',
       'fnver': '0',
       'fourk': '1',
     };

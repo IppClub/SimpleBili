@@ -65,12 +65,41 @@ class _FeedPageState extends ConsumerState<FeedPage> {
         title: const Text('Dynamic Feed'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.star_outline),
+            tooltip: '我的收藏',
+            onPressed: () => context.push('/favorite'),
+          ),
+          IconButton(
             icon: const Icon(Icons.search),
             onPressed: () => context.push('/search'),
           ),
           IconButton(
             icon: const Icon(Icons.logout),
-            onPressed: () => ref.read(authProvider.notifier).logout(),
+            onPressed: () async {
+              final confirm = await showDialog<bool>(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('退出登录'),
+                  content: const Text('确定要退出登录吗？'),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(false),
+                      child: const Text('取消'),
+                    ),
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(true),
+                      child: const Text(
+                        '确认退出',
+                        style: TextStyle(color: Colors.red),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+              if (confirm == true) {
+                ref.read(authProvider.notifier).logout();
+              }
+            },
           ),
         ],
       ),
@@ -130,7 +159,8 @@ class _FeedPageState extends ConsumerState<FeedPage> {
         final authorName = moduleAuthor['name'] ?? 'Unknown';
         final authorFace = moduleAuthor['face'] ?? '';
         final publishTime = moduleAuthor['pub_time'] ?? '';
-        final viewCount = archive['stat']?['view'] ?? '0';
+        final viewCount =
+            archive['stat']?['play'] ?? archive['stat']?['view'] ?? '0';
         final danmaku = archive['stat']?['danmaku'] ?? '0';
         final durationText = archive['duration_text'] ?? '';
         final bvid = archive['bvid'] ?? '';

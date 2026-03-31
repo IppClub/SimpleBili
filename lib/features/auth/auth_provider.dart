@@ -11,13 +11,10 @@ enum AuthStatus {
   waitingConfirm,
   authenticated,
   qrcodeExpired,
-  error
+  error,
 }
 
-enum LoginMethod {
-  qrcode,
-  cookie
-}
+enum LoginMethod { qrcode, cookie }
 
 class AuthState {
   final AuthStatus status;
@@ -53,23 +50,34 @@ class AuthNotifier extends StateNotifier<AuthState> {
   Timer? _pollTimer;
 
   AuthNotifier(this._ref, this._authService)
-      : super(AuthState(status: AuthStatus.initial)) {
+    : super(AuthState(status: AuthStatus.initial)) {
     _checkInitialLoginState();
   }
 
   Future<void> _checkInitialLoginState() async {
     final client = _ref.read(biliClientProvider);
     await client.init();
-    
+
     if (client.cookie.isNotEmpty) {
-      state = state.copyWith(status: AuthStatus.authenticated);
+      // Validate cookie is still working
+      final isValid = await client.checkCookieValid();
+      if (isValid) {
+        state = state.copyWith(status: AuthStatus.authenticated);
+      } else {
+        await client.clearCookie();
+        state = state.copyWith(status: AuthStatus.unauthenticated);
+      }
     } else {
       state = state.copyWith(status: AuthStatus.unauthenticated);
     }
   }
 
   void setLoginMethod(LoginMethod method) {
-    state = state.copyWith(loginMethod: method, status: AuthStatus.unauthenticated, qrcodeUrl: null);
+    state = state.copyWith(
+      loginMethod: method,
+      status: AuthStatus.unauthenticated,
+      qrcodeUrl: null,
+    );
     _pollTimer?.cancel();
   }
 
@@ -129,26 +137,33 @@ class AuthNotifier extends StateNotifier<AuthState> {
     state = state.copyWith(status: AuthStatus.loading);
     try {
       final client = _ref.read(biliClientProvider);
-      
+
       // Construct cookie string
-      final cookieString = 'SESSDATA=$sessdata; bili_jct=$biliJct; DedeUserID=$dedeUserId';
-      
+      final cookieString =
+          'SESSDATA=$sessdata; bili_jct=$biliJct; DedeUserID=$dedeUserId';
+
       // Temporary save to test it
       await client.saveCookie(cookieString);
-      
+
       // Validate by fetching nav info
       final res = await client.dio.get('/x/web-interface/nav');
       if (res.data['code'] == 0 && res.data['data']['isLogin'] == true) {
-        state = state.copyWith(status: AuthStatus.authenticated, errorMessage: null);
+        state = state.copyWith(
+          status: AuthStatus.authenticated,
+          errorMessage: null,
+        );
       } else {
         await client.clearCookie();
         state = state.copyWith(
-          status: AuthStatus.error, 
-          errorMessage: 'Invalid Cookie or session expired'
+          status: AuthStatus.error,
+          errorMessage: 'Invalid Cookie or session expired',
         );
       }
     } catch (e) {
-      state = state.copyWith(status: AuthStatus.error, errorMessage: 'Login error: $e');
+      state = state.copyWith(
+        status: AuthStatus.error,
+        errorMessage: 'Login error: $e',
+      );
     }
   }
 

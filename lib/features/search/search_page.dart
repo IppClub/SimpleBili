@@ -122,7 +122,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
           final dt = DateTime.fromMillisecondsSinceEpoch(
             item['pubdate'] * 1000,
           );
-          date = '${dt.month}-${dt.day}';
+          date = '${dt.year}-${dt.month}-${dt.day}';
         }
 
         return VideoCard(

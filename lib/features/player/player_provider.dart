@@ -69,14 +69,47 @@ class PlayerNotifier extends StateNotifier<VideoPlayerState> {
         qn: state.currentQuality,
       );
 
+      // Extract available qualities from DASH response
+      List<Map<String, dynamic>>? qualities;
+      if (playInfo['dash'] != null) {
+        final videos = playInfo['dash']['video'] as List<dynamic>? ?? [];
+        final seen = <int>{};
+        qualities = [];
+        for (final v in videos) {
+          final id = v['id'] as int;
+          if (seen.add(id)) {
+            qualities.add({'qn': id, 'desc': _qualityName(id)});
+          }
+        }
+        qualities.sort((a, b) => (b['qn'] as int).compareTo(a['qn'] as int));
+      }
+
       state = state.copyWith(
         isLoading: false,
         videoInfo: info,
         playUrlInfo: playInfo,
+        availableQualities: qualities,
       );
     } catch (e) {
       state = state.copyWith(isLoading: false, error: e.toString());
     }
+  }
+
+  static String _qualityName(int qn) {
+    const map = {
+      127: '8K 超高清',
+      126: '杜比视界',
+      125: 'HDR 真彩',
+      120: '4K 超清',
+      116: '1080P 60FPS',
+      112: '1080P 高码率',
+      80: '1080P',
+      74: '720P 60FPS',
+      64: '720P',
+      32: '480P',
+      16: '360P',
+    };
+    return map[qn] ?? '${qn}P';
   }
 
   Future<void> addToFavorite({
@@ -100,7 +133,11 @@ class PlayerNotifier extends StateNotifier<VideoPlayerState> {
     try {
       final cid = state.videoInfo!['cid'];
       final playInfo = await _service.getPlayUrl(_bvid, cid, qn: qn);
-      state = state.copyWith(isLoading: false, playUrlInfo: playInfo);
+      state = state.copyWith(
+        isLoading: false,
+        playUrlInfo: playInfo,
+        // Signal URL changed so player re-opens
+      );
     } catch (e) {
       state = state.copyWith(
         isLoading: false,

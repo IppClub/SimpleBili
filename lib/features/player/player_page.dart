@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -19,15 +20,38 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   late final Player player;
   late final VideoController controller;
   String? _currentUrl;
+  int? _currentQuality;
   double _lastSpeed = 1.0;
   bool _isSeeking = false;
   double _seekValueMs = 0;
+  DateTime? _rightKeyDownTime;
+  DateTime? _leftKeyDownTime;
 
   @override
   void initState() {
     super.initState();
-    player = Player();
+    player = Player(
+      configuration: const PlayerConfiguration(
+        bufferSize: 32 * 1024 * 1024,
+        logLevel: MPVLogLevel.warn,
+      ),
+    );
+    // Increase demuxer buffer for smoother playback at higher speeds
+    if (player.platform is NativePlayer) {
+      final nativePlayer = player.platform as NativePlayer;
+      nativePlayer.setProperty('demuxer-max-bytes', '64MiB');
+      nativePlayer.setProperty('demuxer-max-back-bytes', '32MiB');
+      nativePlayer.setProperty('cache-secs', '30');
+    }
     controller = VideoController(player);
+    // Listen to mpv logs for debugging
+    player.stream.log.listen((log) {
+      debugPrint('[mpv ${log.level}] ${log.prefix}: ${log.text}');
+    });
+    // Listen to player errors
+    player.stream.error.listen((error) {
+      debugPrint('[SimpleBili] Player error: $error');
+    });
   }
 
   @override
@@ -36,28 +60,88 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     super.dispose();
   }
 
-  void _playVideo(Map<String, dynamic> playUrlInfo) {
-    String? url;
-    if (playUrlInfo['durl'] != null && playUrlInfo['durl'].isNotEmpty) {
-      url = playUrlInfo['durl'][0]['url'];
-    } else if (playUrlInfo['dash'] != null &&
-        playUrlInfo['dash']['video'] != null &&
-        playUrlInfo['dash']['video'].isNotEmpty) {
-      url = playUrlInfo['dash']['video'][0]['base_url'];
+  Future<void> _playVideo(Map<String, dynamic> playUrlInfo) async {
+    String? videoUrl;
+    String? audioUrl;
+    final currentQn = ref.read(playerProvider(widget.bvid)).currentQuality;
+
+    if (playUrlInfo['dash'] != null) {
+      final dash = playUrlInfo['dash'];
+      final videos = dash['video'] as List<dynamic>? ?? [];
+      final audios = dash['audio'] as List<dynamic>? ?? [];
+
+      // Select video stream matching requested quality, fallback to highest available
+      if (videos.isNotEmpty) {
+        final match = videos.cast<Map<String, dynamic>>().where(
+          (v) => v['id'] == currentQn,
+        );
+        if (match.isNotEmpty) {
+          videoUrl = match.first['base_url'] ?? match.first['baseUrl'];
+        } else {
+          videoUrl = videos[0]['base_url'] ?? videos[0]['baseUrl'];
+        }
+      }
+
+      // Select highest quality audio stream
+      if (audios.isNotEmpty) {
+        audioUrl = audios[0]['base_url'] ?? audios[0]['baseUrl'];
+      }
+    } else if (playUrlInfo['durl'] != null &&
+        (playUrlInfo['durl'] as List).isNotEmpty) {
+      // Fallback to legacy FLV/MP4 combined stream
+      videoUrl = playUrlInfo['durl'][0]['url'];
     }
 
-    if (url != null && url != _currentUrl) {
-      _currentUrl = url;
-      player.open(
-        Media(
-          url,
-          httpHeaders: {
-            'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-            'Referer': 'https://www.bilibili.com',
-          },
-        ),
+    if (videoUrl != null &&
+        (videoUrl != _currentUrl || currentQn != _currentQuality)) {
+      _currentUrl = videoUrl;
+      _currentQuality = currentQn;
+
+      final headers = {
+        'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Referer': 'https://www.bilibili.com',
+      };
+
+      debugPrint('[SimpleBili] videoUrl: ${videoUrl.substring(0, 80)}...');
+      debugPrint(
+        '[SimpleBili] audioUrl: ${audioUrl != null ? audioUrl.substring(0, 80) : "null"}...',
       );
+
+      // Open video with httpHeaders (media_kit handles per-file headers for video)
+      await player.open(Media(videoUrl, httpHeaders: headers));
+      debugPrint('[SimpleBili] player.open() called');
+
+      // After video is loading, dynamically add audio track via mpv command
+      if (audioUrl != null && player.platform is NativePlayer) {
+        final nativePlayer = player.platform as NativePlayer;
+
+        // Set HTTP headers globally for the audio-add request
+        // Use change-list command for proper string list handling
+        await nativePlayer.command([
+          'change-list',
+          'http-header-fields',
+          'clr',
+          '',
+        ]);
+        await nativePlayer.command([
+          'change-list',
+          'http-header-fields',
+          'append',
+          'Referer: https://www.bilibili.com',
+        ]);
+        await nativePlayer.command([
+          'change-list',
+          'http-header-fields',
+          'append',
+          'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        ]);
+        debugPrint('[SimpleBili] http-header-fields set via change-list');
+
+        // Use audio-add command to dynamically load external audio track
+        await nativePlayer.command(['audio-add', audioUrl, 'select']);
+        debugPrint('[SimpleBili] audio-add command executed');
+      }
     }
   }
 
@@ -72,6 +156,46 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     } else {
       player.play();
     }
+  }
+
+  KeyEventResult _handlePlayerKeyEvent(FocusNode node, KeyEvent event) {
+    if (event.logicalKey == LogicalKeyboardKey.space) {
+      if (event is KeyDownEvent) _togglePlayPause();
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+      if (event is KeyDownEvent) {
+        _rightKeyDownTime = DateTime.now();
+        _lastSpeed = ref.read(playerProvider(widget.bvid)).speed;
+        _updateSpeed(3.0);
+      } else if (event is KeyUpEvent) {
+        _updateSpeed(_lastSpeed);
+        final elapsed = DateTime.now().difference(
+          _rightKeyDownTime ?? DateTime.now(),
+        );
+        if (elapsed.inMilliseconds < 300) {
+          player.seek(player.state.position + const Duration(seconds: 4));
+        }
+        _rightKeyDownTime = null;
+      }
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+      if (event is KeyDownEvent) {
+        _leftKeyDownTime = DateTime.now();
+      } else if (event is KeyUpEvent) {
+        final elapsed = DateTime.now().difference(
+          _leftKeyDownTime ?? DateTime.now(),
+        );
+        if (elapsed.inMilliseconds < 300) {
+          final newPos = player.state.position - const Duration(seconds: 4);
+          player.seek(newPos < Duration.zero ? Duration.zero : newPos);
+        }
+        _leftKeyDownTime = null;
+      }
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
   }
 
   @override
@@ -98,24 +222,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       backgroundColor: Colors.black,
       body: Focus(
         autofocus: true,
-        onKeyEvent: (node, event) {
-          if (event.logicalKey == LogicalKeyboardKey.space) {
-            if (event is KeyDownEvent) {
-              _togglePlayPause();
-            }
-            return KeyEventResult.handled;
-          }
-          if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
-            if (event is KeyDownEvent) {
-              _lastSpeed = playerState.speed;
-              _updateSpeed(3.0);
-            } else if (event is KeyUpEvent) {
-              _updateSpeed(_lastSpeed);
-            }
-            return KeyEventResult.handled;
-          }
-          return KeyEventResult.ignored;
-        },
+        onKeyEvent: _handlePlayerKeyEvent,
         child: LayoutBuilder(
           builder: (context, constraints) {
             final maxVideoHeight = constraints.maxHeight * 0.5;
@@ -280,6 +387,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   }
 
   Future<void> _enterFullscreen() async {
+    final isMobile =
+        defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS;
+
+    if (isMobile) {
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    }
+
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) {
@@ -288,66 +407,77 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
               final state = ref.watch(playerProvider(widget.bvid));
               return Scaffold(
                 backgroundColor: Colors.black,
-                body: Stack(
-                  children: [
-                    Positioned.fill(
-                      child: GestureDetector(
-                        onTap: _togglePlayPause,
-                        child: Stack(
-                          children: [
-                            Positioned.fill(
-                              child: Video(
-                                controller: controller,
-                                controls: NoVideoControls,
+                body: Focus(
+                  autofocus: true,
+                  onKeyEvent: _handlePlayerKeyEvent,
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: GestureDetector(
+                          onTap: _togglePlayPause,
+                          onLongPressStart: (details) {
+                            _lastSpeed = state.speed;
+                            _updateSpeed(3.0);
+                          },
+                          onLongPressEnd: (_) {
+                            _updateSpeed(_lastSpeed);
+                          },
+                          child: Stack(
+                            children: [
+                              Positioned.fill(
+                                child: Video(
+                                  controller: controller,
+                                  controls: NoVideoControls,
+                                ),
                               ),
-                            ),
-                            StreamBuilder<bool>(
-                              stream: player.stream.playing,
-                              builder: (context, snapshot) {
-                                final isPlaying = snapshot.data ?? true;
-                                if (isPlaying) {
-                                  return const SizedBox.shrink();
-                                }
-                                return Center(
-                                  child: Container(
-                                    padding: const EdgeInsets.all(12),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black.withOpacity(0.5),
-                                      shape: BoxShape.circle,
+                              StreamBuilder<bool>(
+                                stream: player.stream.playing,
+                                builder: (context, snapshot) {
+                                  final isPlaying = snapshot.data ?? true;
+                                  if (isPlaying) {
+                                    return const SizedBox.shrink();
+                                  }
+                                  return Center(
+                                    child: Container(
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black.withOpacity(0.5),
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: const Icon(
+                                        Icons.pause,
+                                        size: 36,
+                                        color: Colors.white,
+                                      ),
                                     ),
-                                    child: const Icon(
-                                      Icons.pause,
-                                      size: 36,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                );
-                              },
-                            ),
-                          ],
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                    Positioned(
-                      top: 16,
-                      right: 16,
-                      child: IconButton(
-                        onPressed: () => Navigator.of(context).pop(),
-                        icon: const Icon(Icons.close, color: Colors.white),
-                      ),
-                    ),
-                    if (!state.isLoading && state.error == null)
                       Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        child: _buildPlayerControlsOverlay(
-                          state,
-                          onFullscreenTap: () => Navigator.of(context).pop(),
-                          fullscreenIcon: Icons.fullscreen_exit,
+                        top: 16,
+                        right: 16,
+                        child: IconButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          icon: const Icon(Icons.close, color: Colors.white),
                         ),
                       ),
-                  ],
+                      if (!state.isLoading && state.error == null)
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          child: _buildPlayerControlsOverlay(
+                            state,
+                            onFullscreenTap: () => Navigator.of(context).pop(),
+                            fullscreenIcon: Icons.fullscreen_exit,
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               );
             },
@@ -355,15 +485,24 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         },
       ),
     );
+
+    if (isMobile) {
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
   }
 
   Widget _buildProgressBar() {
     return StreamBuilder<Duration>(
       stream: player.stream.position,
+      initialData: player.state.position,
       builder: (context, positionSnapshot) {
         final position = positionSnapshot.data ?? Duration.zero;
         return StreamBuilder<Duration>(
           stream: player.stream.duration,
+          initialData: player.state.duration,
           builder: (context, durationSnapshot) {
             final duration = durationSnapshot.data ?? Duration.zero;
             final maxMs = duration.inMilliseconds.toDouble();

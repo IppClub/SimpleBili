@@ -90,9 +90,6 @@ lib/
 
 - **Flutter SDK** ≥ 3.11（推荐使用最新 Stable 版本）
 - **Dart SDK** ≥ 3.11
-- **Android Studio / VS Code**（推荐安装 Flutter 和 Dart 插件）
-- **Windows**：Visual Studio 2022 (含 C++ 桌面开发工作负载) — 构建 Windows 版本需要
-- **Android**：Android SDK、已连接的 Android 设备或模拟器
 
 ### 克隆与运行
 
@@ -164,4 +161,4 @@ flutter build windows --release
 
 ## 📄 开源协议
 
-本项目仅供学习交流，暂未选择开源许可证。未经作者许可，不得将本项目用于商业目的。
+本项目仅供学习交流，未经作者许可，不得将本项目用于商业目的。

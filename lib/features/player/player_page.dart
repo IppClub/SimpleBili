@@ -212,31 +212,83 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         '[SimpleBili] audioUrl: ${audioUrl != null ? audioUrl.substring(0, 80) : "null"}...',
       );
 
-      // Use mpv properties to set audio file BEFORE opening, so audio and
-      // video start together in a single demux timeline.  This avoids:
-      //  - audio disappearing on quality switch (audio-add timing race)
-      //  - mobile audio-video desync (two independent buffer timelines)
+      final isMobile =
+          defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS;
+
       if (player.platform is NativePlayer) {
         final nativePlayer = player.platform as NativePlayer;
 
         // Set HTTP headers for both video and audio requests
-        await nativePlayer.setProperty(
+        await nativePlayer.command([
+          'change-list',
           'http-header-fields',
-          'Referer: https://www.bilibili.com,User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        );
+          'clr',
+          '',
+        ]);
+        await nativePlayer.command([
+          'change-list',
+          'http-header-fields',
+          'append',
+          'Referer: https://www.bilibili.com',
+        ]);
+        await nativePlayer.command([
+          'change-list',
+          'http-header-fields',
+          'append',
+          'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        ]);
 
-        // Bind external audio file BEFORE open so mpv treats it as part of
-        // the same playback session and keeps A/V in sync from frame 0.
-        if (audioUrl != null) {
-          await nativePlayer.setProperty('audio-files', audioUrl);
-          debugPrint('[SimpleBili] audio-files property set');
+        if (!isMobile) {
+          // Desktop: bind audio file BEFORE open for perfect sync
+          if (audioUrl != null) {
+            await nativePlayer.setProperty('audio-files', audioUrl);
+            debugPrint('[SimpleBili] audio-files property set (desktop)');
+          } else {
+            await nativePlayer.setProperty('audio-files', '');
+          }
         } else {
+          // Mobile: clear audio-files, will use audio-add after file loads
           await nativePlayer.setProperty('audio-files', '');
         }
       }
 
       await player.open(Media(videoUrl, httpHeaders: headers));
-      debugPrint('[SimpleBili] player.open() called with pre-bound audio');
+      debugPrint('[SimpleBili] player.open() called');
+
+      // Mobile: wait for video to be ready, then add audio track.
+      // Use a Completer to wait for the first 'playing' or 'buffering' state
+      // so audio-add isn't ignored due to the file not being loaded yet.
+      if (isMobile && audioUrl != null && player.platform is NativePlayer) {
+        final nativePlayer = player.platform as NativePlayer;
+        // Wait for mpv to signal the file is loaded
+        await player.stream.playing
+            .firstWhere((playing) => true)
+            .timeout(const Duration(seconds: 5), onTimeout: () => false);
+        // Re-set headers for the audio request
+        await nativePlayer.command([
+          'change-list',
+          'http-header-fields',
+          'clr',
+          '',
+        ]);
+        await nativePlayer.command([
+          'change-list',
+          'http-header-fields',
+          'append',
+          'Referer: https://www.bilibili.com',
+        ]);
+        await nativePlayer.command([
+          'change-list',
+          'http-header-fields',
+          'append',
+          'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        ]);
+        await nativePlayer.command(['audio-add', audioUrl, 'select']);
+        // Seek to start to sync audio and video from frame 0
+        await player.seek(Duration.zero);
+        debugPrint('[SimpleBili] audio-add + seek(0) done (mobile)');
+      }
     }
   }
 

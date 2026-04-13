@@ -105,6 +105,33 @@ class PlayerNotifier extends StateNotifier<VideoPlayerState> {
         qualities.sort((a, b) => (b['qn'] as int).compareTo(a['qn'] as int));
       }
 
+      // Auto-select highest available quality on first load
+      int selectedQuality = state.currentQuality;
+      if (qualities != null &&
+          qualities.isNotEmpty &&
+          cid == null &&
+          state.playUrlInfo == null) {
+        final bestQn = qualities.first['qn'] as int;
+        if (bestQn != state.currentQuality) {
+          selectedQuality = bestQn;
+          // Re-fetch with the best quality
+          final bestPlayInfo = await _service.getPlayUrl(
+            _bvid,
+            targetCid,
+            qn: bestQn,
+          );
+          state = state.copyWith(
+            isLoading: false,
+            videoInfo: info,
+            playUrlInfo: bestPlayInfo,
+            availableQualities: qualities,
+            currentCid: targetCid,
+            currentQuality: bestQn,
+          );
+          return;
+        }
+      }
+
       state = state.copyWith(
         isLoading: false,
         videoInfo: info,

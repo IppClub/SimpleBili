@@ -52,13 +52,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
           defaultTargetPlatform == TargetPlatform.android ||
           defaultTargetPlatform == TargetPlatform.iOS;
       if (isMobile) {
-        // Mobile: smaller buffers to save memory, enable hardware decode
+        // Mobile: enable hardware decode and sync tweaks
         nativePlayer.setProperty('demuxer-max-bytes', '32MiB');
         nativePlayer.setProperty('demuxer-max-back-bytes', '16MiB');
         nativePlayer.setProperty('cache-secs', '15');
         nativePlayer.setProperty('hwdec', 'auto');
         nativePlayer.setProperty('vd-lavc-dr', 'yes');
         nativePlayer.setProperty('vd-lavc-fast', 'yes');
+        // Force audio-video sync: drop/duplicate video frames to match audio
+        // This eliminates the initial desync where video plays at wrong speed
+        nativePlayer.setProperty('video-sync', 'audio');
+        // Correct initial audio-video offset
+        nativePlayer.setProperty('autosync', '30');
+        // Start playback only after enough data for both streams is buffered
+        nativePlayer.setProperty('demuxer-readahead-secs', '3');
+        nativePlayer.setProperty('hr-seek', 'yes');
       } else {
         // Desktop: larger buffers for quality
         nativePlayer.setProperty('demuxer-max-bytes', '64MiB');
@@ -155,8 +163,32 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       }
 
       // Select highest quality audio stream
+      // Prefer dolby/flac audio if available, else use normal audio sorted by bandwidth
       if (audios.isNotEmpty) {
-        audioUrl = audios[0]['base_url'] ?? audios[0]['baseUrl'];
+        final dolbyAudio = dash['dolby']?['audio'] as List<dynamic>?;
+        final flacAudio = dash['flac']?['audio'] as Map<String, dynamic>?;
+        if (flacAudio != null) {
+          audioUrl = flacAudio['base_url'] ?? flacAudio['baseUrl'];
+          debugPrint('[SimpleBili] Using FLAC audio');
+        } else if (dolbyAudio != null && dolbyAudio.isNotEmpty) {
+          audioUrl = dolbyAudio[0]['base_url'] ?? dolbyAudio[0]['baseUrl'];
+          debugPrint('[SimpleBili] Using Dolby audio');
+        } else {
+          // Sort by bandwidth descending to get highest quality
+          final sortedAudios =
+              List<Map<String, dynamic>>.from(
+                audios.cast<Map<String, dynamic>>(),
+              )..sort(
+                (a, b) => ((b['bandwidth'] ?? 0) as int).compareTo(
+                  (a['bandwidth'] ?? 0) as int,
+                ),
+              );
+          audioUrl =
+              sortedAudios.first['base_url'] ?? sortedAudios.first['baseUrl'];
+          debugPrint(
+            '[SimpleBili] Audio bandwidth: ${sortedAudios.first['bandwidth']}',
+          );
+        }
       }
     } else if (playUrlInfo['durl'] != null &&
         (playUrlInfo['durl'] as List).isNotEmpty) {
@@ -180,40 +212,31 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         '[SimpleBili] audioUrl: ${audioUrl != null ? audioUrl.substring(0, 80) : "null"}...',
       );
 
-      // Open video with httpHeaders (media_kit handles per-file headers for video)
-      await player.open(Media(videoUrl, httpHeaders: headers));
-      debugPrint('[SimpleBili] player.open() called');
-
-      // After video is loading, dynamically add audio track via mpv command
-      if (audioUrl != null && player.platform is NativePlayer) {
+      // Use mpv properties to set audio file BEFORE opening, so audio and
+      // video start together in a single demux timeline.  This avoids:
+      //  - audio disappearing on quality switch (audio-add timing race)
+      //  - mobile audio-video desync (two independent buffer timelines)
+      if (player.platform is NativePlayer) {
         final nativePlayer = player.platform as NativePlayer;
 
-        // Set HTTP headers globally for the audio-add request
-        // Use change-list command for proper string list handling
-        await nativePlayer.command([
-          'change-list',
+        // Set HTTP headers for both video and audio requests
+        await nativePlayer.setProperty(
           'http-header-fields',
-          'clr',
-          '',
-        ]);
-        await nativePlayer.command([
-          'change-list',
-          'http-header-fields',
-          'append',
-          'Referer: https://www.bilibili.com',
-        ]);
-        await nativePlayer.command([
-          'change-list',
-          'http-header-fields',
-          'append',
-          'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        ]);
-        debugPrint('[SimpleBili] http-header-fields set via change-list');
+          'Referer: https://www.bilibili.com,User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        );
 
-        // Use audio-add command to dynamically load external audio track
-        await nativePlayer.command(['audio-add', audioUrl, 'select']);
-        debugPrint('[SimpleBili] audio-add command executed');
+        // Bind external audio file BEFORE open so mpv treats it as part of
+        // the same playback session and keeps A/V in sync from frame 0.
+        if (audioUrl != null) {
+          await nativePlayer.setProperty('audio-files', audioUrl);
+          debugPrint('[SimpleBili] audio-files property set');
+        } else {
+          await nativePlayer.setProperty('audio-files', '');
+        }
       }
+
+      await player.open(Media(videoUrl, httpHeaders: headers));
+      debugPrint('[SimpleBili] player.open() called with pre-bound audio');
     }
   }
 
